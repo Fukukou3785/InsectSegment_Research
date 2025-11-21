@@ -11,82 +11,91 @@ export default function ProcessingPage() {
   const [status, setStatus] = useState("がぞうをよみこんでいます...")
 
   useEffect(() => {
+    // 1. 画像がない場合は戻る
     const image = sessionStorage.getItem("insectImage")
     if (!image) {
       router.push("/upload")
       return
     }
 
-    // Simulate processing steps
-    const steps = [
-      { progress: 20, status: "がぞうをよみこんでいます...", delay: 500 },
-      { progress: 40, status: "こんちゅうをさがしています...", delay: 1000 },
-      { progress: 60, status: "かたちをかいせきしています...", delay: 1000 },
-      { progress: 80, status: "マスクをつくっています...", delay: 1000 },
-      { progress: 100, status: "かんりょう！", delay: 500 },
-    ]
+    // --- AI処理の実行関数 ---
+    const runAIProcess = async () => {
+      try {
+        // 画像データの準備（data:image/png;base64, の部分を取り除く）
+        const imageToSegment = image.replace(/^data:image\/\w+;base64,/, "")
 
-    let currentStep = 0
-    const processNextStep = () => {
-      if (currentStep < steps.length) {
-        const step = steps[currentStep]
-        setProgress(step.progress)
-        setStatus(step.status)
-        currentStep++
+        // ★ここでAPIにリクエストを送ります（非同期）
+        // 127.0.0.1 (localhost) を使用
+        const response = await fetch('http://127.0.0.1:8000/api/segment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image_base64: imageToSegment }),
+        });
 
-        if (currentStep === steps.length) {
-          // Generate a simple mask (for demo purposes)
-          generateDemoMask(image)
-          setTimeout(() => {
-            router.push("/editor")
-          }, 800)
-        } else {
-          setTimeout(processNextStep, step.delay)
+        if (!response.ok) {
+          throw new Error('AIしょりにしっぱいしました');
         }
+
+        // 結果を受け取る
+        const result = await response.json();
+
+        // データの保存
+        sessionStorage.setItem("segmentedImage", result.segmented_image_base64);
+        // 胸の座標も保存（あれば）
+        if (result.thorax_top !== undefined) {
+            sessionStorage.setItem("thoraxTop", String(result.thorax_top));
+            sessionStorage.setItem("thoraxBottom", String(result.thorax_bottom));
+        }
+
+        // ★完了！進捗を100%にする
+        setProgress(100)
+        setStatus("かんりょう！")
+        
+        // 少しだけ余韻を残して次のページへ
+        setTimeout(() => {
+          router.push("/editor")
+        }, 800)
+
+      } catch (error) {
+        console.error(error)
+        setStatus("エラーがはっせいしました")
+        alert("AIの処理に失敗しました。もう一度試してください。")
+        router.push("/upload")
       }
     }
 
-    setTimeout(processNextStep, 300)
+    // --- 進捗バーのアニメーション（AI待ちの間、ゆっくり進む） ---
+    // AIが終わるまでは 90% で止まるようにしています
+    const timer = setInterval(() => {
+      setProgress((oldProgress) => {
+        if (oldProgress === 100) {
+          return 100
+        }
+        if (oldProgress >= 90) {
+          // AIが終わるのを待っている状態
+          return 90 
+        }
+        // 0~90%までは少しずつ進む
+        const diff = Math.random() * 10
+        return Math.min(oldProgress + diff, 90)
+      })
+    }, 500) // 0.5秒ごとに更新
+
+    // メッセージの変化（雰囲気用）
+    setTimeout(() => setStatus("こんちゅうをさがしています..."), 1000)
+    setTimeout(() => setStatus("かたちをかいせきしています..."), 2500)
+    setTimeout(() => setStatus("マスクをつくっています..."), 4500)
+
+    // ★処理開始
+    runAIProcess()
+
+    // クリーンアップ
+    return () => {
+      clearInterval(timer)
+    }
   }, [router])
 
-  const generateDemoMask = (imageData: string) => {
-    // Create a simple demo mask
-    const img = new Image()
-    img.onload = () => {
-      const canvas = document.createElement("canvas")
-      canvas.width = img.width
-      canvas.height = img.height
-      const ctx = canvas.getContext("2d")
-
-      if (ctx) {
-        // Draw the original image
-        ctx.drawImage(img, 0, 0)
-
-        // Create a simple elliptical mask in the center
-        const centerX = canvas.width / 2
-        const centerY = canvas.height / 2
-        const radiusX = canvas.width * 0.3
-        const radiusY = canvas.height * 0.4
-
-        // Create mask canvas
-        const maskCanvas = document.createElement("canvas")
-        maskCanvas.width = canvas.width
-        maskCanvas.height = canvas.height
-        const maskCtx = maskCanvas.getContext("2d")
-
-        if (maskCtx) {
-          maskCtx.fillStyle = "white"
-          maskCtx.beginPath()
-          maskCtx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2)
-          maskCtx.fill()
-
-          const maskData = maskCanvas.toDataURL("image/png")
-          sessionStorage.setItem("insectMask", maskData)
-        }
-      }
-    }
-    img.src = imageData
-  }
+  // ★ generateDemoMask は削除しました（本物のデータを上書きしてしまうため）
 
   return (
     <div className="min-h-screen flex flex-col bg-background">

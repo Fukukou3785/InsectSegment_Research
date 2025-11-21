@@ -70,12 +70,11 @@ export default function EditorPage() {
 
  // page.tsx の 82行目から
   useEffect(() => {
-    // 1. 元画像と、AIが生成したマスク画像の両方をセッションストレージから取得
-    const imageData = sessionStorage.getItem("insectImage") // 元画像
-    const maskData = sessionStorage.getItem("segmentedImage") // AIが生成したマスク画像
+    // 1. データ取得
+    const imageData = sessionStorage.getItem("insectImage")
+    const maskData = sessionStorage.getItem("segmentedImage")
 
     if (!imageData) {
-      // 元画像がなければアップロードページに戻す
       router.push("/upload")
       return
     }
@@ -88,36 +87,49 @@ export default function EditorPage() {
     const maskCtx = maskCanvas.getContext("2d")
     if (!ctx || !maskCtx) return
 
-    // 2. 元画像(insectImage)をロード
+    // 2. 画像ロード
     const img = new Image()
     img.onload = () => {
-      // まず元画像をオリジナルとして保持
-      setOriginalImage(img)
-      canvas.width = img.width
-      canvas.height = img.height
-      maskCanvas.width = img.width
-      maskCanvas.height = img.height
+      // === ★サイズ調整ロジック (ここが重要！) ===
+      const MAX_SIZE = 800 // 長辺を800pxに制限（これで画面からはみ出しにくくなります）
+      let width = img.width
+      let height = img.height
 
-      // 3. AIが生成したマスク画像(segmentedImage)をロード
+      if (width > height) {
+        if (width > MAX_SIZE) {
+          height = Math.round(height * (MAX_SIZE / width))
+          width = MAX_SIZE
+        }
+      } else {
+        if (height > MAX_SIZE) {
+          width = Math.round(width * (MAX_SIZE / height))
+          height = MAX_SIZE
+        }
+      }
+
+      // キャンバスの解像度をリサイズ後のサイズに設定
+      canvas.width = width
+      canvas.height = height
+      maskCanvas.width = width
+      maskCanvas.height = height
+      
+      setOriginalImage(img) // 元画像データは保持
+
+      // 3. マスク画像のロードと描画
       if (maskData) {
         const maskImg = new Image()
         maskImg.onload = () => {
-          // AIのマスクを、非表示の「マスク用Canvas」に描画
-          maskCtx.drawImage(maskImg, 0, 0)
+          // マスクも新しいサイズに合わせて描画
+          maskCtx.drawImage(maskImg, 0, 0, width, height)
           
-          // 4. 合成して表示
-          // 元画像とマスクを合成してメインCanvasに表示
-          redrawCanvas() 
-          
-          // 5. AIが描画した状態を「最初の履歴」として保存
+          // 合成表示 (リサイズ後のimgを渡す)
+          redrawCanvas(img) 
           saveToHistory() 
         }
         maskImg.src = maskData
       } else {
-        // AIのマスクがもし無かった場合（デバッグ用）
-        // 元画像だけを表示
-        ctx.drawImage(img, 0, 0)
-        // 空白の状態を「最初の履歴」として保存
+        // マスクがない場合
+        redrawCanvas(img)
         saveToHistory()
       }
     }
@@ -125,25 +137,28 @@ export default function EditorPage() {
   }, [router])
 // ここまでを置き換え
 
-  const redrawCanvas = () => {
+  // 引数 (img) を受け取れるように変更
+  const redrawCanvas = (img: HTMLImageElement | null = null) => {
     const canvas = canvasRef.current
     const maskCanvas = maskCanvasRef.current
-    if (!canvas || !maskCanvas || !originalImage) return
+    const targetImage = img || originalImage 
+
+    if (!canvas || !maskCanvas || !targetImage) return
 
     const ctx = canvas.getContext("2d")
     if (!ctx) return
 
-    // 1. 画面をクリア
+    // 画面クリア
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-    // 2. まず「虫の元画像」を普通に描く
-    ctx.drawImage(originalImage, 0, 0)
+    // ★重要: 元画像を、現在のキャンバスサイズ(width, height)に合わせて縮小して描画
+    ctx.drawImage(targetImage, 0, 0, canvas.width, canvas.height)
 
-    // 3. その上に「AIマスク + 手書きブラシ」を半透明で重ねる
-    ctx.save() // 設定を一時保存
-    ctx.globalAlpha = 0.6 // ★ここで全体を半透明(60%)にする
+    // マスクを重ねる (maskCanvasは既にリサイズ済みなのでそのまま)
+    ctx.save()
+    ctx.globalAlpha = 0.6
     ctx.drawImage(maskCanvas, 0, 0)
-    ctx.restore() // 設定を元に戻す
+    ctx.restore()
   }
 
   

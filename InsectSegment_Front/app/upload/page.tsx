@@ -527,52 +527,9 @@ export default function UploadPage(): ReactElement {
 
   const handleProcess = async () => {
     if (selectedImage) {
-      setIsProcessing(true) 
-      
-      const imageToSegment = selectedImage; 
-
-      try {
-        console.log("Sending request to API..."); 
-        const response = await fetch('http://192.168.10.107:8000/api/segment', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            image_base64: imageToSegment 
-          }),
-        });
-        console.log("API response received:", response.status); 
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.detail || 'セグメンテーションに失敗しました。');
-        }
-
-        // ★修正: サーバーからのレスポンスに胸の座標(thorax_top, thorax_bottom)が含まれるため、型定義を更新します
-        const result: { 
-          segmented_image_base64: string;
-          thorax_top: number;
-          thorax_bottom: number;
-        } = await response.json();
-
-        // 4. データをsessionStorageに保存
-        sessionStorage.setItem("insectImage", selectedImage);
-        sessionStorage.setItem("segmentedImage", result.segmented_image_base64);
-
-        // ★追加: ここでAPIから受け取った胸の座標を保存します
-        // (次の /result ページで使用するため)
-        sessionStorage.setItem("thoraxTop", String(result.thorax_top));
-        sessionStorage.setItem("thoraxBottom", String(result.thorax_bottom));
-
-        // 5. processingページに遷移
-        router.push("/processing");
-
-      } catch (error) {
-        console.error("Error calling segment API:", error);
-        alert(error instanceof Error ? error.message : 'APIの呼び出しに失敗しました。');
-        setIsProcessing(false);
-      }
+      // 画像を保存して、すぐにprocessingページへ飛ばすだけにする
+      sessionStorage.setItem("insectImage", selectedImage)
+      router.push("/processing")
     }
   }
 
