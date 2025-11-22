@@ -47,7 +47,6 @@ export default function ResultPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [selectedPart, setSelectedPart] = useState<number | null>(null)
   const [quizMode, setQuizMode] = useState(false)
-  const [isDrawingLine, setIsDrawingLine] = useState(false)
   const [drawnLines, setDrawnLines] = useState<number[]>([])
   const [quizResult, setQuizResult] = useState<string | null>(null)
   
@@ -59,7 +58,7 @@ export default function ResultPage() {
     const imageData = sessionStorage.getItem("insectImage")
     const maskData = sessionStorage.getItem("editedMask")
     
-    // ★APIから受け取った胸の位置を取得
+    // APIから受け取った胸の位置を取得
     const storedTop = sessionStorage.getItem("thoraxTop")
     const storedBottom = sessionStorage.getItem("thoraxBottom")
 
@@ -79,12 +78,12 @@ export default function ResultPage() {
 
     const img = new Image()
     img.onload = () => {
+      // キャンバスを元画像のサイズに合わせる
       canvas.width = img.width
       canvas.height = img.height
       ctx.drawImage(img, 0, 0)
 
       // 描画関数の呼び出し準備
-      // 値が取れていない場合は、画像高さからの割合（フォールバック）を使用
       const currentThoraxTop = storedTop ? Number(storedTop) : img.height * 0.35
       const currentThoraxBottom = storedBottom ? Number(storedBottom) : img.height * 0.65
 
@@ -93,7 +92,8 @@ export default function ResultPage() {
         maskImg.onload = () => {
           ctx.save()
           ctx.globalAlpha = 0.6
-          ctx.drawImage(maskImg, 0, 0)
+          // ★修正: マスク画像(小さい)を、キャンバス全体(大きい)に合わせて引き伸ばして描画
+          ctx.drawImage(maskImg, 0, 0, canvas.width, canvas.height)
           ctx.restore()
 
           if (!quizMode) {
@@ -112,7 +112,7 @@ export default function ResultPage() {
       }
     }
     img.src = imageData
-  }, [router, quizMode, drawnLines]) // 依存配列
+  }, [router, quizMode, drawnLines])
 
   // ユーザーが引いた線を描画するヘルパー関数
   const drawQuizLines = (ctx: CanvasRenderingContext2D, width: number) => {
@@ -130,10 +130,8 @@ export default function ResultPage() {
 
   // 正解の線とラベルを描画する関数
   const drawDividingLines = (ctx: CanvasRenderingContext2D, width: number, height: number, tTop: number, tBottom: number) => {
-    // 区切り線 (biological boundaries)
     const headEnd = tTop
     const thoraxEnd = tBottom
-    // abdomenEnd は実質、画像の下端か、描画上の目安
 
     // 黒い枠線
     ctx.strokeStyle = "#000000"
@@ -165,23 +163,21 @@ export default function ResultPage() {
     ctx.lineTo(width, thoraxEnd)
     ctx.stroke()
 
-    // Draw labels with background
+    // Draw labels
     ctx.font = "bold 28px sans-serif"
     ctx.textAlign = "right"
     ctx.textBaseline = "middle"
 
-    // ラベル位置の計算（各部位の中心付近）
     const labels = [
       { text: "あたま", y: headEnd / 2, color: bodyParts[0].color },
       { text: "むね", y: (headEnd + thoraxEnd) / 2, color: bodyParts[1].color },
-      { text: "おなか", y: (thoraxEnd + height) / 2, color: bodyParts[2].color }, // おなかのラベル位置は残りの領域の中心
+      { text: "おなか", y: (thoraxEnd + height) / 2, color: bodyParts[2].color },
     ]
     
-    // おなかが極端に狭い場合の調整（ラベルがはみ出ないように）
     if (labels[2].y > height - 20) labels[2].y = height - 20;
 
     labels.forEach((label) => {
-      if (label.y < 0 || label.y > height) return // 画面外なら描画しない
+      if (label.y < 0 || label.y > height) return
 
       const metrics = ctx.measureText(label.text)
       const padding = 12
@@ -215,19 +211,15 @@ export default function ResultPage() {
     const canvas = canvasRef.current
     if (!canvas) return
 
-    // ユーザーの線を上から順にソート
     const sortedLines = [...drawnLines].sort((a, b) => a - b)
-    const userLine1 = sortedLines[0] // 上の線（あたま/むね の境界想定）
-    const userLine2 = sortedLines[1] // 下の線（むね/おなか の境界想定）
+    const userLine1 = sortedLines[0]
+    const userLine2 = sortedLines[1]
 
-    // 正解値を取得（なければ仮の値）
     const correctTop = thoraxTop ?? canvas.height * 0.35
     const correctBottom = thoraxBottom ?? canvas.height * 0.65
     
-    // 許容誤差 (画像の高さの10%くらいはずれてもOKとする)
     const tolerance = canvas.height * 0.10
 
-    // 判定
     const line1Correct = Math.abs(userLine1 - correctTop) < tolerance
     const line2Correct = Math.abs(userLine2 - correctBottom) < tolerance
 
@@ -244,7 +236,6 @@ export default function ResultPage() {
     setDrawnLines([])
     setQuizResult(null)
 
-    // Redraw canvas (再描画)
     const imageData = sessionStorage.getItem("insectImage")
     const maskData = sessionStorage.getItem("editedMask")
     const canvas = canvasRef.current
@@ -263,12 +254,9 @@ export default function ResultPage() {
         maskImg.onload = () => {
           ctx.save()
           ctx.globalAlpha = 0.6
-          ctx.drawImage(maskImg, 0, 0)
+          // ★修正: ここでもマスク画像を引き伸ばして描画
+          ctx.drawImage(maskImg, 0, 0, canvas.width, canvas.height)
           ctx.restore()
-          
-          // クイズリセット時は、ユーザーの線(drawnLines)は空なので特に描画しない
-          // もし dividing lines を表示したいならここで呼ぶが、
-          // クイズモード継続中なら線がない状態を表示するのが自然
         }
         maskImg.src = maskData
       }
@@ -391,7 +379,7 @@ export default function ResultPage() {
               </>
             ) : (
               <>
-                {/* Body parts list - Make scrollable within fixed height */}
+                {/* Body parts list */}
                 <div className="space-y-2 overflow-y-auto flex-1 min-h-0">
                   {bodyParts.map((part, index) => (
                     <Card

@@ -6,18 +6,18 @@ import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { ArrowLeft, Eraser, Paintbrush, RotateCcw, Sparkles } from "lucide-react"
+import { ArrowLeft, Eraser, Paintbrush, RotateCcw, Sparkles, ZoomIn, ZoomOut } from "lucide-react"
 import Link from "next/link"
 
 type BodyPartType = "head" | "thorax" | "abdomen" | "legs"
 type BrushSizeType = "small" | "medium" | "large"
+type ToolType = "brush" | "eraser" | "zoom-in" | "zoom-out"
 
-// Python側の色定義(PALETTE)と完全に一致させます
 const bodyPartColors = {
-  head: "rgb(31, 119, 180)",    // 青
-  thorax: "rgb(44, 160, 44)",   // 緑
-  abdomen: "rgb(214, 39, 40)",  // 赤
-  legs: "rgb(148, 103, 189)",   // 紫
+  head: "rgb(31, 119, 180)",
+  thorax: "rgb(44, 160, 44)",
+  abdomen: "rgb(214, 39, 40)",
+  legs: "rgb(148, 103, 189)",
 }
 
 const bodyPartLabels = {
@@ -50,13 +50,18 @@ export default function EditorPage() {
   const router = useRouter()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const maskCanvasRef = useRef<HTMLCanvasElement>(null)
+  const guardCanvasRef = useRef<HTMLCanvasElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+
   const [isDrawing, setIsDrawing] = useState(false)
   const [brushSize, setBrushSize] = useState<BrushSizeType>("medium")
-  const [tool, setTool] = useState<"brush" | "eraser">("brush")
+  const [tool, setTool] = useState<ToolType>("brush")
   const [selectedPart, setSelectedPart] = useState<BodyPartType>("head")
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null)
   const [history, setHistory] = useState<ImageData[]>([])
   const [lastPos, setLastPos] = useState<{ x: number; y: number } | null>(null)
+  
+  const [zoom, setZoom] = useState(1.0)
 
   useEffect(() => {
     const handleResize = () => {
@@ -68,9 +73,7 @@ export default function EditorPage() {
     return () => window.removeEventListener("resize", handleResize)
   }, [originalImage])
 
- // page.tsx の 82行目から
   useEffect(() => {
-    // 1. データ取得
     const imageData = sessionStorage.getItem("insectImage")
     const maskData = sessionStorage.getItem("segmentedImage")
 
@@ -81,17 +84,19 @@ export default function EditorPage() {
 
     const canvas = canvasRef.current
     const maskCanvas = maskCanvasRef.current
-    if (!canvas || !maskCanvas) return
+    const guardCanvas = guardCanvasRef.current
+    const container = containerRef.current // ★コンテナ取得
+    if (!canvas || !maskCanvas || !guardCanvas || !container) return
 
     const ctx = canvas.getContext("2d")
     const maskCtx = maskCanvas.getContext("2d")
-    if (!ctx || !maskCtx) return
+    const guardCtx = guardCanvas.getContext("2d")
+    if (!ctx || !maskCtx || !guardCtx) return
 
-    // 2. 画像ロード
     const img = new Image()
     img.onload = () => {
-      // === ★サイズ調整ロジック (ここが重要！) ===
-      const MAX_SIZE = 800 // 長辺を800pxに制限（これで画面からはみ出しにくくなります）
+      // 1. まずはキャンバス自体の解像度を決定 (800pxルール)
+      const MAX_SIZE = 800
       let width = img.width
       let height = img.height
 
@@ -107,37 +112,48 @@ export default function EditorPage() {
         }
       }
 
-      // キャンバスの解像度をリサイズ後のサイズに設定
       canvas.width = width
       canvas.height = height
       maskCanvas.width = width
       maskCanvas.height = height
-      
-      setOriginalImage(img) // 元画像データは保持
+      guardCanvas.width = width
+      guardCanvas.height = height
 
-      // 3. マスク画像のロードと描画
+      // 2. ★修正: 初期ズームの計算
+      // コンテナの大きさ(padding分を引く)と、画像の大きさを比較して、
+      // 画面に収まるような倍率 (fitScale) を計算します。
+      const availableW = container.clientWidth - 32 // p-4 = 16px*2
+      const availableH = container.clientHeight - 32
+      
+      const scaleW = availableW / width
+      const scaleH = availableH / height
+      
+      // 小さい方の倍率に合わせる（ただし最大1.0倍まで）
+      const fitScale = Math.min(scaleW, scaleH, 1.0)
+      
+      // 計算した倍率をセット！これで最初はピッタリ収まります
+      setZoom(fitScale)
+      
+      setOriginalImage(img)
+
       if (maskData) {
         const maskImg = new Image()
         maskImg.onload = () => {
-          // マスクも新しいサイズに合わせて描画
           maskCtx.drawImage(maskImg, 0, 0, width, height)
-          
-          // 合成表示 (リサイズ後のimgを渡す)
+          guardCtx.clearRect(0, 0, width, height)
+          guardCtx.drawImage(maskImg, 0, 0, width, height)
           redrawCanvas(img) 
           saveToHistory() 
         }
         maskImg.src = maskData
       } else {
-        // マスクがない場合
         redrawCanvas(img)
         saveToHistory()
       }
     }
     img.src = imageData
   }, [router])
-// ここまでを置き換え
 
-  // 引数 (img) を受け取れるように変更
   const redrawCanvas = (img: HTMLImageElement | null = null) => {
     const canvas = canvasRef.current
     const maskCanvas = maskCanvasRef.current
@@ -148,19 +164,14 @@ export default function EditorPage() {
     const ctx = canvas.getContext("2d")
     if (!ctx) return
 
-    // 画面クリア
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-    // ★重要: 元画像を、現在のキャンバスサイズ(width, height)に合わせて縮小して描画
     ctx.drawImage(targetImage, 0, 0, canvas.width, canvas.height)
 
-    // マスクを重ねる (maskCanvasは既にリサイズ済みなのでそのまま)
     ctx.save()
     ctx.globalAlpha = 0.6
     ctx.drawImage(maskCanvas, 0, 0)
     ctx.restore()
   }
-
   
   const saveToHistory = () => {
     const maskCanvas = maskCanvasRef.current
@@ -172,7 +183,23 @@ export default function EditorPage() {
     setHistory((prev) => [...prev.slice(-9), imageData])
   }
 
+  const handleZoom = (delta: number) => {
+    setZoom((prev) => {
+      const newZoom = prev + delta
+      return Math.min(Math.max(newZoom, 0.5), 3.0)
+    })
+  }
+
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (tool === "zoom-in") {
+      handleZoom(0.5)
+      return
+    }
+    if (tool === "zoom-out") {
+      handleZoom(-0.5)
+      return
+    }
+
     setIsDrawing(true)
     const pos = getCanvasPosition(e)
     if (pos) {
@@ -216,7 +243,8 @@ export default function EditorPage() {
 
   const drawAtPosition = (x: number, y: number) => {
     const maskCanvas = maskCanvasRef.current
-    if (!maskCanvas) return
+    const guardCanvas = guardCanvasRef.current
+    if (!maskCanvas || !guardCanvas) return
 
     const maskCtx = maskCanvas.getContext("2d")
     if (!maskCtx) return
@@ -226,6 +254,10 @@ export default function EditorPage() {
     maskCtx.beginPath()
     maskCtx.arc(x, y, brushSizes[brushSize], 0, Math.PI * 2)
     maskCtx.fill()
+
+    maskCtx.globalCompositeOperation = "destination-in"
+    maskCtx.drawImage(guardCanvas, 0, 0, maskCanvas.width, maskCanvas.height)
+    maskCtx.globalCompositeOperation = "source-over"
   }
 
   const interpolatePoints = (x1: number, y1: number, x2: number, y2: number) => {
@@ -285,6 +317,12 @@ export default function EditorPage() {
     router.push("/result")
   }
 
+  const getCursorStyle = () => {
+    if (tool === "zoom-in") return "zoom-in"
+    if (tool === "zoom-out") return "zoom-out"
+    return "crosshair"
+  }
+
   return (
     <div className="h-screen flex flex-col bg-gradient-to-b from-green-50 to-blue-50 overflow-hidden">
       <header className="bg-gradient-to-r from-green-500 to-blue-500 text-white py-4 px-4 flex items-center gap-3 shadow-lg flex-shrink-0">
@@ -299,11 +337,10 @@ export default function EditorPage() {
         </div>
       </header>
 
-      {/* Left Sidebar - Always visible on all screen sizes */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         <aside className="w-32 sm:w-48 md:w-56 lg:w-64 xl:w-72 flex-shrink-0 flex flex-col p-1.5 sm:p-2 md:p-3 bg-white border-r border-gray-200 overflow-hidden">
+          {/* Sidebar content... (変更なし) */}
           <div className="flex flex-col h-full gap-1.5 sm:gap-2 md:gap-3 overflow-y-auto">
-            {/* Body Parts Selection */}
             <Card className="p-1.5 sm:p-2 md:p-3 bg-gradient-to-br from-blue-50 to-green-50 shadow-md flex-shrink-0">
               <h2 className="text-[10px] sm:text-xs md:text-sm font-bold mb-1 sm:mb-2 text-center text-gray-800">
                 どこをぬる？
@@ -320,7 +357,10 @@ export default function EditorPage() {
                       color: "white",
                       textShadow: "1px 1px 2px rgba(0,0,0,0.3)",
                     }}
-                    onClick={() => setSelectedPart(part)}
+                    onClick={() => {
+                      setSelectedPart(part)
+                      setTool("brush")
+                    }}
                   >
                     <div className="text-base sm:text-xl mb-0.5">{bodyPartEmojis[part]}</div>
                     <div className="text-[8px] sm:text-[10px]">{bodyPartLabels[part]}</div>
@@ -329,7 +369,6 @@ export default function EditorPage() {
               </div>
             </Card>
 
-            {/* Tools */}
             <Card className="p-1.5 sm:p-2 md:p-3 bg-gradient-to-br from-purple-50 to-pink-50 shadow-md flex-shrink-0">
               <h3 className="text-[10px] sm:text-xs md:text-sm font-bold mb-1 sm:mb-2 text-center text-gray-800">
                 どうぐ
@@ -359,10 +398,37 @@ export default function EditorPage() {
                   <Eraser className="w-3 h-3 sm:w-4 sm:h-4" />
                   <span className="text-[8px] sm:text-[10px]">けしゴム</span>
                 </Button>
+                
+                <Button
+                  size="sm"
+                  className={`h-10 sm:h-12 md:h-14 flex flex-col gap-0.5 text-[9px] sm:text-xs font-bold transition-all transform hover:scale-105 ${
+                    tool === "zoom-in"
+                      ? "bg-teal-500 hover:bg-teal-600 shadow-lg scale-105 ring-2 ring-yellow-400"
+                      : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                  }`}
+                  onClick={() => setTool("zoom-in")}
+                >
+                  <ZoomIn className="w-3 h-3 sm:w-4 sm:h-4" />
+                  <span className="text-[8px] sm:text-[10px]">かくだい</span>
+                </Button>
+                <Button
+                  size="sm"
+                  className={`h-10 sm:h-12 md:h-14 flex flex-col gap-0.5 text-[9px] sm:text-xs font-bold transition-all transform hover:scale-105 ${
+                    tool === "zoom-out"
+                      ? "bg-teal-500 hover:bg-teal-600 shadow-lg scale-105 ring-2 ring-yellow-400"
+                      : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                  }`}
+                  onClick={() => setTool("zoom-out")}
+                >
+                  <ZoomOut className="w-3 h-3 sm:w-4 sm:h-4" />
+                  <span className="text-[8px] sm:text-[10px]">しゅくしょう</span>
+                </Button>
+              </div>
+              <div className="mt-1 text-center text-[10px] text-gray-600 font-bold">
+               {/* ばいりつ: {Math.round(zoom * 100)}% */}
               </div>
             </Card>
 
-            {/* Brush Size */}
             <Card className="p-1.5 sm:p-2 md:p-3 bg-gradient-to-br from-yellow-50 to-orange-50 shadow-md flex-shrink-0">
               <h3 className="text-[10px] sm:text-xs md:text-sm font-bold mb-1 sm:mb-2 text-center text-gray-800">
                 おおきさ
@@ -395,7 +461,6 @@ export default function EditorPage() {
 
             <div className="flex-1 min-h-1" />
 
-            {/* Undo Button */}
             <Button
               size="sm"
               variant="outline"
@@ -407,7 +472,6 @@ export default function EditorPage() {
               <span className="text-[8px] sm:text-[10px]">もどす</span>
             </Button>
 
-            {/* Next Button */}
             <Button
               size="sm"
               className="h-10 sm:h-12 md:h-14 text-[9px] sm:text-xs md:text-sm font-bold bg-gradient-to-r from-green-500 to-blue-500 hover:from-green-600 hover:to-blue-600 shadow-xl transform hover:scale-105 transition-all flex-shrink-0"
@@ -418,13 +482,22 @@ export default function EditorPage() {
           </div>
         </aside>
 
-        {/* Main Canvas Area */}
-        <main className="flex-1 min-w-0 min-h-0 flex overflow-hidden">
-          <div className="flex-1 p-2 sm:p-3 md:p-4 flex items-center justify-center bg-gradient-to-br from-green-50 via-blue-50 to-purple-50">
-            <div className="relative bg-white rounded-xl sm:rounded-2xl shadow-2xl p-2 sm:p-3 md:p-4 w-full h-full flex items-center justify-center overflow-hidden">
+        <main className="flex-1 min-w-0 min-h-0 flex overflow-hidden bg-gradient-to-br from-green-50 via-blue-50 to-purple-50">
+          {/* ★修正: items-center / justify-center を削除し、flex のみにする */}
+          <div ref={containerRef} className="flex-1 w-full h-full overflow-auto flex p-4">
+            
+            <div 
+              // ★修正: m-auto を追加して、小さい時は中央、大きい時は左上基準にする
+              className="relative shadow-2xl bg-white transition-all duration-200 ease-out m-auto"
+              style={{
+                width: canvasRef.current ? canvasRef.current.width * zoom : "auto",
+                height: canvasRef.current ? canvasRef.current.height * zoom : "auto",
+              }}
+            >
               <canvas
                 ref={canvasRef}
-                className="max-w-full max-h-full w-auto h-auto object-contain touch-none cursor-crosshair rounded-lg"
+                className="w-full h-full touch-none rounded-lg"
+                style={{ cursor: getCursorStyle() }}
                 onMouseDown={startDrawing}
                 onMouseMove={draw}
                 onMouseUp={stopDrawing}
@@ -434,6 +507,7 @@ export default function EditorPage() {
                 onTouchEnd={stopDrawing}
               />
               <canvas ref={maskCanvasRef} className="hidden" />
+              <canvas ref={guardCanvasRef} className="hidden" />
             </div>
           </div>
         </main>

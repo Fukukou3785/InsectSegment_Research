@@ -27,8 +27,8 @@ app = FastAPI()
 # CORS設定
 origins = [
     "http://localhost:3000",
-    "http://10.124.66.6:3000",
-    "http://192.168.10.107:3000"
+    "http://127.0.0.1:3000",
+    "http://10.124.66.6:3000"
 ]
 
 app.add_middleware(
@@ -51,7 +51,6 @@ print("Model loaded successfully.")
 class SegmentRequest(BaseModel):
     image_base64: str
 
-# ★変更点: 胸の座標を返すフィールドを追加
 class SegmentResponse(BaseModel):
     segmented_image_base64: str
     thorax_top: int
@@ -189,25 +188,31 @@ def _create_transparent_mask(image_shape: Tuple[int, int], id_mask: np.ndarray, 
         
     return Image.fromarray(out_rgba, 'RGBA')
 
-# === ★追加: クイズ用のロジック (thorax_quiz.pyから移植) ===
-def binary_dilate8(mask: np.ndarray, iters: int = 1) -> np.ndarray:
+# === ★修正: 脚の付け根を強力に検出する ===
+def binary_dilate_agg(mask: np.ndarray, iters: int = 1) -> np.ndarray:
+    # scipyが無い環境でも動くよう、numpyだけで膨張処理を実装
     m = mask.astype(bool).copy()
     for _ in range(iters):
+        # 上下左右へのシフトで膨張させる
         up    = np.pad(m[:-1,:], ((1,0),(0,0)))
         down  = np.pad(m[1: ,:], ((0,1),(0,0)))
         left  = np.pad(m[:, :-1], ((0,0),(1,0)))
         right = np.pad(m[:, 1: ], ((0,0),(0,1)))
-        upleft   = np.pad(m[:-1,:-1], ((1,0),(1,0)))
-        upright  = np.pad(m[:-1,1: ], ((1,0),(0,1)))
-        downleft = np.pad(m[1: ,:-1], ((0,1),(1,0)))
-        downright= np.pad(m[1: ,1: ], ((0,1),(0,1)))
-        m = m | up | down | left | right | upleft | upright | downleft | downright
+        m = m | up | down | left | right
     return m
 
 def detect_thorax_band(id_mask: np.ndarray, lh: LabelHierarchy) -> Tuple[int, int]:
+    """
+    【方針】
+    1. 「脚」と「体（頭+胸+腹）」が接触している場所（＝付け根）を探す。
+    2. その付け根の中で「一番下のY座標」を「胸の下端 (y_bot)」とする。
+       （※生物学的に、一番下の脚が生えている場所までが胸だから）
+    3. 「頭」と「胸」の境界を「胸の上端 (y_top)」とする。
+    """
     H, W = id_mask.shape[:2]
     id2name = _safe_id2name(lh)
 
+    # IDの分類
     head_ids, thorax_ids, abdomen_ids, leg_ids = set(), set(), set(), set()
     for lab in np.unique(id_mask):
         lab = int(lab)
@@ -219,39 +224,62 @@ def detect_thorax_band(id_mask: np.ndarray, lh: LabelHierarchy) -> Tuple[int, in
         elif ("leg" in n) or ("append" in n) or ("a1" in n) or ("a2" in n) or ("a3" in n):
             leg_ids.add(lab)
 
-    head    = np.isin(id_mask, list(head_ids))
-    thorax  = np.isin(id_mask, list(thorax_ids))
-    abdomen = np.isin(id_mask, list(abdomen_ids))
-    legs    = np.isin(id_mask, list(leg_ids))
+    # マスクの作成
+    mask_head    = np.isin(id_mask, list(head_ids))
+    mask_thorax  = np.isin(id_mask, list(thorax_ids))
+    mask_abdomen = np.isin(id_mask, list(abdomen_ids))
+    mask_legs    = np.isin(id_mask, list(leg_ids))
+    
+    # 「体幹」の定義 (頭、胸、腹のどれか)
+    mask_body = mask_head | mask_thorax | mask_abdomen
 
-    ys_head = np.where(head)[0]
-    y_head_bot = int(ys_head.max()) if ys_head.size > 0 else 0
-    ys_abd  = np.where(abdomen)[0]
-    y_abd_top = int(ys_abd.min()) if ys_abd.size > 0 else H - 1
+    # --- 1. 上の線 (y_top): 頭と胸の境界 ---
+    # デフォルト: 全体の35%
+    y_top = int(H * 0.35)
+    
+    ys_head = np.where(mask_head)[0]
+    ys_thorax = np.where(mask_thorax)[0]
+    
+    if ys_head.size > 0 and ys_thorax.size > 0:
+        # 頭の下端と胸の上端の中間
+        y_top = int((ys_head.max() + ys_thorax.min()) / 2)
+    elif ys_head.size > 0:
+        y_top = int(ys_head.max())
+    elif ys_thorax.size > 0:
+        y_top = int(ys_thorax.min())
 
-    legs_d   = binary_dilate8(legs, iters=3)
-    thorax_d = binary_dilate8(thorax, iters=1)
-    attachments = legs_d & thorax_d
-    ys = np.where(attachments)[0]
+    # --- 2. 下の線 (y_bot): 一番下の脚の付け根 ---
+    # デフォルト: 全体の65%
+    y_bot = int(H * 0.65)
 
-    if ys.size >= 3:
-        y_top = int(np.percentile(ys, 2))
-        y_bot = int(np.percentile(ys, 98)) + 2
-        y_top = max(y_top, y_head_bot)
-        y_bot = min(y_bot, y_abd_top)
-        if y_bot - y_top < 8:
-            pad = 4
-            y_top = max(y_head_bot, y_top - pad)
-            y_bot = min(y_abd_top, y_bot + pad)
-        return max(0, y_top), min(H - 1, y_bot)
+    # 脚をかなり強く膨張させて、体との接触点を探す (iters=15: これくらい広げれば隙間があっても繋がる)
+    dilated_legs = binary_dilate_agg(mask_legs, iters=15)
+    
+    # 「膨張させた脚」と「体」が重なる部分 ＝ 付け根エリア
+    connections = dilated_legs & mask_body
+    ys_conn = np.where(connections)[0]
 
-    ys_th = np.where(thorax)[0]
-    if ys_th.size > 0:
-        y_top = max(int(ys_th.min()), y_head_bot)
-        y_bot = min(int(ys_th.max()), y_abd_top)
-        return y_top, y_bot
+    if ys_conn.size > 0:
+        # 接触点の一番下 (98パーセンタイルでノイズ除去) を採用
+        # これが「一番下の脚の付け根の高さ」になる
+        y_bot = int(np.percentile(ys_conn, 98))
+    else:
+        # 脚が見つからない、または体と離れすぎている場合は、
+        # 「胸」または「腹」の境界を使う（バックアッププラン）
+        if ys_thorax.size > 0:
+            y_bot = int(ys_thorax.max())
 
-    return int(H * 0.35), int(H * 0.65)
+    # --- 3. 最終補正 ---
+    # 上下関係が逆転していたら直す
+    if y_bot <= y_top + 10:
+        y_bot = max(y_bot, y_top + 20)
+        if y_bot >= H: y_bot = H - 1
+
+    # 画面外に出ないように
+    y_top = max(0, min(H-1, y_top))
+    y_bot = max(0, min(H-1, y_bot))
+
+    return y_top, y_bot
 
 
 # === 4. APIエンドポイント ===
@@ -298,7 +326,7 @@ async def segment_image(request: SegmentRequest):
             print("Result retrieved successfully.")
             id_mask = id_full.astype(np.uint32)
             
-            # === ★追加: 胸の縦帯を計算 ===
+            # === 胸の縦帯を計算 ===
             print("Calculating thorax band...")
             thorax_top, thorax_bottom = detect_thorax_band(id_mask, lh)
             print(f"Thorax band detected: {thorax_top} - {thorax_bottom}")
@@ -314,7 +342,7 @@ async def segment_image(request: SegmentRequest):
             
             print("Segmentation successful.")
             
-            # ★変更: 座標も一緒に返す
+            # 座標も一緒に返す
             return SegmentResponse(
                 segmented_image_base64=f"data:image/png;base64,{segmented_b64}",
                 thorax_top=thorax_top,
