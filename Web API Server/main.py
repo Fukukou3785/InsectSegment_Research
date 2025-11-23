@@ -14,6 +14,9 @@ from typing import Dict, Tuple, List, Union
 import numpy as np
 from PIL import Image
 
+# ラベリングとスライス取得、膨張
+from scipy.ndimage import label, find_objects, binary_dilation
+
 # --- maphis関連のインポート ---
 import maphis
 from maphis.common.label_hierarchy import LabelHierarchy
@@ -188,31 +191,11 @@ def _create_transparent_mask(image_shape: Tuple[int, int], id_mask: np.ndarray, 
         
     return Image.fromarray(out_rgba, 'RGBA')
 
-# === ★修正: 脚の付け根を強力に検出する ===
-def binary_dilate_agg(mask: np.ndarray, iters: int = 1) -> np.ndarray:
-    # scipyが無い環境でも動くよう、numpyだけで膨張処理を実装
-    m = mask.astype(bool).copy()
-    for _ in range(iters):
-        # 上下左右へのシフトで膨張させる
-        up    = np.pad(m[:-1,:], ((1,0),(0,0)))
-        down  = np.pad(m[1: ,:], ((0,1),(0,0)))
-        left  = np.pad(m[:, :-1], ((0,0),(1,0)))
-        right = np.pad(m[:, 1: ], ((0,0),(0,1)))
-        m = m | up | down | left | right
-    return m
-
+# === ★最終最強版: 脚の先端判定＋体幹交差判定 ===
 def detect_thorax_band(id_mask: np.ndarray, lh: LabelHierarchy) -> Tuple[int, int]:
-    """
-    【方針】
-    1. 「脚」と「体（頭+胸+腹）」が接触している場所（＝付け根）を探す。
-    2. その付け根の中で「一番下のY座標」を「胸の下端 (y_bot)」とする。
-       （※生物学的に、一番下の脚が生えている場所までが胸だから）
-    3. 「頭」と「胸」の境界を「胸の上端 (y_top)」とする。
-    """
     H, W = id_mask.shape[:2]
     id2name = _safe_id2name(lh)
 
-    # IDの分類
     head_ids, thorax_ids, abdomen_ids, leg_ids = set(), set(), set(), set()
     for lab in np.unique(id_mask):
         lab = int(lab)
@@ -224,58 +207,97 @@ def detect_thorax_band(id_mask: np.ndarray, lh: LabelHierarchy) -> Tuple[int, in
         elif ("leg" in n) or ("append" in n) or ("a1" in n) or ("a2" in n) or ("a3" in n):
             leg_ids.add(lab)
 
-    # マスクの作成
-    mask_head    = np.isin(id_mask, list(head_ids))
-    mask_thorax  = np.isin(id_mask, list(thorax_ids))
+    mask_head = np.isin(id_mask, list(head_ids))
+    mask_thorax = np.isin(id_mask, list(thorax_ids))
     mask_abdomen = np.isin(id_mask, list(abdomen_ids))
-    mask_legs    = np.isin(id_mask, list(leg_ids))
+    mask_legs = np.isin(id_mask, list(leg_ids))
     
-    # 「体幹」の定義 (頭、胸、腹のどれか)
-    mask_body = mask_head | mask_thorax | mask_abdomen
-
-    # --- 1. 上の線 (y_top): 頭と胸の境界 ---
-    # デフォルト: 全体の35%
+    # 1. 上の線 (頭と胸の境界)
     y_top = int(H * 0.35)
-    
     ys_head = np.where(mask_head)[0]
     ys_thorax = np.where(mask_thorax)[0]
-    
     if ys_head.size > 0 and ys_thorax.size > 0:
-        # 頭の下端と胸の上端の中間
         y_top = int((ys_head.max() + ys_thorax.min()) / 2)
     elif ys_head.size > 0:
         y_top = int(ys_head.max())
     elif ys_thorax.size > 0:
         y_top = int(ys_thorax.min())
 
-    # --- 2. 下の線 (y_bot): 一番下の脚の付け根 ---
-    # デフォルト: 全体の65%
-    y_bot = int(H * 0.65)
+    # 2. 下の線 (脚の付け根の下端)
+    y_bot = int(H * 0.65) # デフォルト
 
-    # 脚をかなり強く膨張させて、体との接触点を探す (iters=15: これくらい広げれば隙間があっても繋がる)
-    dilated_legs = binary_dilate_agg(mask_legs, iters=15)
+    # 脚をラベリング (侵食はしない！)
+    labeled_legs, num_legs = label(mask_legs)
     
-    # 「膨張させた脚」と「体」が重なる部分 ＝ 付け根エリア
-    connections = dilated_legs & mask_body
-    ys_conn = np.where(connections)[0]
+    leg_candidates = []
+    
+    if num_legs > 0:
+        slices = find_objects(labeled_legs)
+        
+        for i, sl in enumerate(slices):
+            if sl is None: continue
+            
+            # 「つま先」の位置 (Y座標最大値)
+            tip_y = sl[0].stop
+            
+            # 小さすぎるノイズは除外
+            height = sl[0].stop - sl[0].start
+            if height < 10: continue
+            
+            leg_candidates.append({
+                "id": i + 1,
+                "tip_y": tip_y,
+                "mask": (labeled_legs == i + 1)
+            })
+        
+        if len(leg_candidates) > 0:
+            # つま先が下にある順にソート
+            # くっついていても「一番下まである塊」が選ばれるのでOK
+            leg_candidates.sort(key=lambda x: x["tip_y"], reverse=True)
+            
+            # 下位2本（または塊）を採用
+            target_legs = leg_candidates[:2]
+            
+            intersection_bottoms = []
+            
+            # 体幹（胸＋腹）の定義
+            mask_body = mask_thorax | mask_abdomen
+            
+            for leg in target_legs:
+                # 脚を膨張させて体幹と接触させる (隙間対策)
+                # アリの細い脚も、オケラの離れた脚も、これで捕まえる
+                dilated_leg = binary_dilation(leg["mask"], iterations=10)
+                
+                # 体幹との重なり（交差エリア）を取得
+                intersection = dilated_leg & mask_body
+                ys_inter = np.where(intersection)[0]
+                
+                if ys_inter.size > 0:
+                    # 交差エリアの「一番下」＝「脚の付け根の下端」
+                    inter_bottom = np.max(ys_inter)
+                    intersection_bottoms.append(inter_bottom)
+            
+            if len(intersection_bottoms) > 0:
+                # 左右の脚で低い方（Yが大きい方）に合わせるか、平均を取る
+                # ここでは平均を採用して安定させる
+                y_bot = int(sum(intersection_bottoms) / len(intersection_bottoms))
+                
+                # 安全装置: 胸の上端より上ならおかしいので補正
+                if ys_thorax.size > 0:
+                    thorax_top_val = int(ys_thorax.min())
+                    thorax_bottom_val = int(ys_thorax.max())
+                    if y_bot < (thorax_top_val + thorax_bottom_val) / 2:
+                         y_bot = thorax_bottom_val
 
-    if ys_conn.size > 0:
-        # 接触点の一番下 (98パーセンタイルでノイズ除去) を採用
-        # これが「一番下の脚の付け根の高さ」になる
-        y_bot = int(np.percentile(ys_conn, 98))
     else:
-        # 脚が見つからない、または体と離れすぎている場合は、
-        # 「胸」または「腹」の境界を使う（バックアッププラン）
+        # 脚が見つからない場合のフォールバック
         if ys_thorax.size > 0:
             y_bot = int(ys_thorax.max())
 
-    # --- 3. 最終補正 ---
-    # 上下関係が逆転していたら直す
+    # 3. 最終チェック
     if y_bot <= y_top + 10:
-        y_bot = max(y_bot, y_top + 20)
-        if y_bot >= H: y_bot = H - 1
-
-    # 画面外に出ないように
+        y_bot = max(y_bot, y_top + 30)
+        
     y_top = max(0, min(H-1, y_top))
     y_bot = max(0, min(H-1, y_bot))
 
