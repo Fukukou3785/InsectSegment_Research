@@ -14,6 +14,9 @@ from typing import Dict, Tuple, List, Union
 import numpy as np
 from PIL import Image
 
+# ★追加1: 日付取得用
+from datetime import datetime
+
 # ラベリングとスライス取得、膨張
 from scipy.ndimage import label, find_objects, binary_dilation
 
@@ -56,6 +59,14 @@ class SegmentRequest(BaseModel):
 
 class SegmentResponse(BaseModel):
     segmented_image_base64: str
+    thorax_top: int
+    thorax_bottom: int
+
+# ★追加2: ログ保存用のデータ定義
+class LogData(BaseModel):
+    original_base64: str
+    ai_mask_base64: str
+    user_mask_base64: str
     thorax_top: int
     thorax_bottom: int
 
@@ -252,7 +263,6 @@ def detect_thorax_band(id_mask: np.ndarray, lh: LabelHierarchy) -> Tuple[int, in
         
         if len(leg_candidates) > 0:
             # つま先が下にある順にソート
-            # くっついていても「一番下まである塊」が選ばれるのでOK
             leg_candidates.sort(key=lambda x: x["tip_y"], reverse=True)
             
             # 下位2本（または塊）を採用
@@ -264,8 +274,7 @@ def detect_thorax_band(id_mask: np.ndarray, lh: LabelHierarchy) -> Tuple[int, in
             mask_body = mask_thorax | mask_abdomen
             
             for leg in target_legs:
-                # 脚を膨張させて体幹と接触させる (隙間対策)
-                # アリの細い脚も、オケラの離れた脚も、これで捕まえる
+                # 脚を膨張させて体幹と接触させる
                 dilated_leg = binary_dilation(leg["mask"], iterations=10)
                 
                 # 体幹との重なり（交差エリア）を取得
@@ -278,11 +287,9 @@ def detect_thorax_band(id_mask: np.ndarray, lh: LabelHierarchy) -> Tuple[int, in
                     intersection_bottoms.append(inter_bottom)
             
             if len(intersection_bottoms) > 0:
-                # 左右の脚で低い方（Yが大きい方）に合わせるか、平均を取る
-                # ここでは平均を採用して安定させる
                 y_bot = int(sum(intersection_bottoms) / len(intersection_bottoms))
                 
-                # 安全装置: 胸の上端より上ならおかしいので補正
+                # 安全装置
                 if ys_thorax.size > 0:
                     thorax_top_val = int(ys_thorax.min())
                     thorax_bottom_val = int(ys_thorax.max())
@@ -290,7 +297,6 @@ def detect_thorax_band(id_mask: np.ndarray, lh: LabelHierarchy) -> Tuple[int, in
                          y_bot = thorax_bottom_val
 
     else:
-        # 脚が見つからない場合のフォールバック
         if ys_thorax.size > 0:
             y_bot = int(ys_thorax.max())
 
@@ -376,6 +382,50 @@ async def segment_image(request: SegmentRequest):
             import traceback
             traceback.print_exc()
             return JSONResponse(status_code=500, content={"detail": str(e)})
+
+# ★追加3: データを保存するAPI
+@app.post("/api/save_log")
+async def save_log(data: LogData):
+    try:
+        # 保存用フォルダの作成 (logs/日時)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_dir = Path("logs") / timestamp
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"Saving logs to: {log_dir}")
+
+        # 画像保存関数
+        def save_b64_image(b64_str: str, filename: str):
+            if "," in b64_str:
+                _, b64_data = b64_str.split(",", 1)
+            else:
+                b64_data = b64_str
+            
+            img_data = base64.b64decode(b64_data)
+            img = Image.open(io.BytesIO(img_data))
+            img.save(log_dir / filename)
+
+        # 画像3枚を保存
+        save_b64_image(data.original_base64, "original.png")
+        save_b64_image(data.ai_mask_base64, "mask_ai.png")
+        save_b64_image(data.user_mask_base64, "mask_user.png")
+
+        # メタデータを保存
+        meta_info = {
+            "timestamp": timestamp,
+            "thorax_top": data.thorax_top,
+            "thorax_bottom": data.thorax_bottom
+        }
+        with open(log_dir / "data.json", "w", encoding="utf-8") as f:
+            json.dump(meta_info, f, indent=4)
+
+        return {"status": "success", "path": str(log_dir)}
+
+    except Exception as e:
+        print(f"Error saving log: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"detail": str(e)})
 
 # === 5. サーバー起動 ===
 if __name__ == "__main__":

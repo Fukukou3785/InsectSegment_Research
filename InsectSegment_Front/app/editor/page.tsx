@@ -306,14 +306,49 @@ export default function EditorPage() {
     }
   }
 
-  const handleNext = () => {
+  const handleNext = async () => {
     const canvas = canvasRef.current
     const maskCanvas = maskCanvasRef.current
     if (!canvas || !maskCanvas) return
 
-    const maskData = maskCanvas.toDataURL("image/png")
-    sessionStorage.setItem("editedMask", maskData)
+    // 1. ユーザーが編集したマスクを取得して保存 (次の画面用)
+    const userMaskData = maskCanvas.toDataURL("image/png")
+    sessionStorage.setItem("editedMask", userMaskData)
 
+    // 2. 保存するかどうかユーザーに聞く
+    const shouldSave = window.confirm("研究のためにデータを保存しますか？\n（「はい」で保存、「いいえ」で保存せずに進みます）")
+
+    if (shouldSave) {
+      // 「はい」の場合：データを準備してバックエンドに送信
+      const originalData = sessionStorage.getItem("insectImage")
+      const aiMaskData = sessionStorage.getItem("segmentedImage")
+      const tTop = sessionStorage.getItem("thoraxTop")
+      const tBottom = sessionStorage.getItem("thoraxBottom")
+
+      if (originalData && aiMaskData) {
+        try {
+          console.log("Saving logs to backend...")
+          // 非同期で送信 (awaitをつけると保存完了まで待つ。待たせたくなければawaitを外す)
+          await fetch('http://localhost:8000/api/save_log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              original_base64: originalData,
+              ai_mask_base64: aiMaskData,
+              user_mask_base64: userMaskData,
+              thorax_top: Number(tTop) || 0,
+              thorax_bottom: Number(tBottom) || 0
+            }),
+          })
+          alert("データを保存しました！ご協力ありがとうございます。")
+        } catch (e) {
+          console.error("Failed to save log:", e)
+          alert("保存に失敗しましたが、次へ進みます。")
+        }
+      }
+    }
+
+    // 3. 次の画面へ
     router.push("/result")
   }
 
