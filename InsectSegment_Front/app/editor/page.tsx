@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { ArrowLeft, Eraser, Paintbrush, RotateCcw, Sparkles, ZoomIn, ZoomOut } from "lucide-react"
+import { ArrowLeft, Eraser, Paintbrush, RotateCcw, Sparkles, ZoomIn, ZoomOut, Lock, Unlock } from "lucide-react"
 import Link from "next/link"
 
 type BodyPartType = "head" | "thorax" | "abdomen" | "legs"
@@ -52,6 +52,9 @@ export default function EditorPage() {
   const maskCanvasRef = useRef<HTMLCanvasElement>(null)
   const guardCanvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  
+  // ★追加: カスタムカーソル用の参照
+  const cursorRef = useRef<HTMLDivElement>(null)
 
   const [isDrawing, setIsDrawing] = useState(false)
   const [brushSize, setBrushSize] = useState<BrushSizeType>("medium")
@@ -62,6 +65,10 @@ export default function EditorPage() {
   const [lastPos, setLastPos] = useState<{ x: number; y: number } | null>(null)
   
   const [zoom, setZoom] = useState(1.0)
+  const [useGuard, setUseGuard] = useState(true)
+
+  // カーソルの状態管理（マウスがキャンバス内にあるか）
+  const [isHoveringCanvas, setIsHoveringCanvas] = useState(false)
 
   useEffect(() => {
     const handleResize = () => {
@@ -72,6 +79,31 @@ export default function EditorPage() {
     window.addEventListener("resize", handleResize)
     return () => window.removeEventListener("resize", handleResize)
   }, [originalImage])
+
+  // ★追加: カーソルのサイズと色を更新するEffect
+  useEffect(() => {
+    if (!cursorRef.current) return
+
+    // 半径(px) * 2 * ズーム倍率 = 見た目の直径
+    const diameter = brushSizes[brushSize] * 2 * zoom
+    
+    cursorRef.current.style.width = `${diameter}px`
+    cursorRef.current.style.height = `${diameter}px`
+    
+    // 色の更新
+    if (tool === 'eraser') {
+        cursorRef.current.style.borderColor = '#ffffff'
+        cursorRef.current.style.backgroundColor = 'rgba(255, 255, 255, 0.3)'
+        cursorRef.current.style.boxShadow = '0 0 4px rgba(0,0,0,0.5)'
+    } else {
+        // 現在のパーツの色を取得
+        cursorRef.current.style.borderColor = 'white'
+        cursorRef.current.style.backgroundColor = bodyPartColors[selectedPart].replace('rgb', 'rgba').replace(')', ', 0.2)') // 薄く色をつける
+        // 枠線に色をつける（白縁取り＋パーツ色の二重線っぽくして見やすく）
+        cursorRef.current.style.boxShadow = `0 0 0 2px ${bodyPartColors[selectedPart]}, 0 0 4px rgba(0,0,0,0.5)`
+    }
+
+  }, [brushSize, zoom, tool, selectedPart])
 
   useEffect(() => {
     const imageData = sessionStorage.getItem("insectImage")
@@ -85,7 +117,7 @@ export default function EditorPage() {
     const canvas = canvasRef.current
     const maskCanvas = maskCanvasRef.current
     const guardCanvas = guardCanvasRef.current
-    const container = containerRef.current // ★コンテナ取得
+    const container = containerRef.current
     if (!canvas || !maskCanvas || !guardCanvas || !container) return
 
     const ctx = canvas.getContext("2d")
@@ -95,7 +127,6 @@ export default function EditorPage() {
 
     const img = new Image()
     img.onload = () => {
-      // 1. まずはキャンバス自体の解像度を決定 (800pxルール)
       const MAX_SIZE = 800
       let width = img.width
       let height = img.height
@@ -119,19 +150,11 @@ export default function EditorPage() {
       guardCanvas.width = width
       guardCanvas.height = height
 
-      // 2. ★修正: 初期ズームの計算
-      // コンテナの大きさ(padding分を引く)と、画像の大きさを比較して、
-      // 画面に収まるような倍率 (fitScale) を計算します。
-      const availableW = container.clientWidth - 32 // p-4 = 16px*2
+      const availableW = container.clientWidth - 32
       const availableH = container.clientHeight - 32
-      
       const scaleW = availableW / width
       const scaleH = availableH / height
-      
-      // 小さい方の倍率に合わせる（ただし最大1.0倍まで）
       const fitScale = Math.min(scaleW, scaleH, 1.0)
-      
-      // 計算した倍率をセット！これで最初はピッタリ収まります
       setZoom(fitScale)
       
       setOriginalImage(img)
@@ -190,6 +213,27 @@ export default function EditorPage() {
     })
   }
 
+  // ★追加: カーソル位置更新
+  const updateCursorPosition = (e: React.MouseEvent | React.TouchEvent) => {
+    if (!cursorRef.current) return
+    
+    let clientX, clientY
+    if ("touches" in e) {
+       // タッチ操作時は指で隠れるのでカーソルはあまり意味がないが、一応追従させる
+       if (e.touches.length > 0) {
+         clientX = e.touches[0].clientX
+         clientY = e.touches[0].clientY
+       } else { return }
+    } else {
+       clientX = e.clientX
+       clientY = e.clientY
+    }
+
+    // カーソル要素をマウス位置に移動（transformを使うと高速）
+    // translate(-50%, -50%) で中心をマウス位置に合わせる
+    cursorRef.current.style.transform = `translate(${clientX}px, ${clientY}px) translate(-50%, -50%)`
+  }
+
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     if (tool === "zoom-in") {
       handleZoom(0.5)
@@ -201,6 +245,7 @@ export default function EditorPage() {
     }
 
     setIsDrawing(true)
+    updateCursorPosition(e) // 描画開始時もカーソル移動
     const pos = getCanvasPosition(e)
     if (pos) {
       setLastPos(pos)
@@ -255,8 +300,11 @@ export default function EditorPage() {
     maskCtx.arc(x, y, brushSizes[brushSize], 0, Math.PI * 2)
     maskCtx.fill()
 
-    maskCtx.globalCompositeOperation = "destination-in"
-    maskCtx.drawImage(guardCanvas, 0, 0, maskCanvas.width, maskCanvas.height)
+    if (useGuard) {
+        maskCtx.globalCompositeOperation = "destination-in"
+        maskCtx.drawImage(guardCanvas, 0, 0, maskCanvas.width, maskCanvas.height)
+    }
+    
     maskCtx.globalCompositeOperation = "source-over"
   }
 
@@ -272,7 +320,10 @@ export default function EditorPage() {
     }
   }
 
+  // ★修正: draw関数内でカーソル位置も更新
   const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    updateCursorPosition(e)
+
     if (!isDrawing) return
 
     const pos = getCanvasPosition(e)
@@ -311,15 +362,12 @@ export default function EditorPage() {
     const maskCanvas = maskCanvasRef.current
     if (!canvas || !maskCanvas) return
 
-    // 1. ユーザーが編集したマスクを取得して保存 (次の画面用)
     const userMaskData = maskCanvas.toDataURL("image/png")
     sessionStorage.setItem("editedMask", userMaskData)
 
-    // 2. 保存するかどうかユーザーに聞く
     const shouldSave = window.confirm("研究のためにデータを保存しますか？\n（「はい」で保存、「いいえ」で保存せずに進みます）")
 
     if (shouldSave) {
-      // 「はい」の場合：データを準備してバックエンドに送信
       const originalData = sessionStorage.getItem("insectImage")
       const aiMaskData = sessionStorage.getItem("segmentedImage")
       const tTop = sessionStorage.getItem("thoraxTop")
@@ -328,7 +376,6 @@ export default function EditorPage() {
       if (originalData && aiMaskData) {
         try {
           console.log("Saving logs to backend...")
-          // 非同期で送信 (awaitをつけると保存完了まで待つ。待たせたくなければawaitを外す)
           await fetch('http://localhost:8000/api/save_log', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -348,18 +395,32 @@ export default function EditorPage() {
       }
     }
 
-    // 3. 次の画面へ
     router.push("/result")
   }
 
   const getCursorStyle = () => {
     if (tool === "zoom-in") return "zoom-in"
     if (tool === "zoom-out") return "zoom-out"
-    return "crosshair"
+    // ブラシと消しゴムの時はシステムカーソルを消す（カスタムカーソルを使うため）
+    return "none"
   }
 
   return (
     <div className="h-screen flex flex-col bg-gradient-to-b from-green-50 to-blue-50 overflow-hidden">
+      
+      {/* ★追加: カスタムカーソル要素 (ブラシ/消しゴムの時だけ表示) */}
+      <div 
+        ref={cursorRef}
+        className="fixed pointer-events-none rounded-full border-2 border-white z-50 transition-opacity duration-75"
+        style={{ 
+            width: 0, height: 0, 
+            opacity: (isHoveringCanvas && (tool === 'brush' || tool === 'eraser')) ? 1 : 0,
+            left: 0, top: 0,
+            // 描画最適化
+            willChange: 'transform'
+        }}
+      />
+
       <header className="bg-gradient-to-r from-green-500 to-blue-500 text-white py-4 px-4 flex items-center gap-3 shadow-lg flex-shrink-0">
         <Link href="/upload">
           <Button variant="ghost" size="icon" className="text-white hover:bg-white/20 rounded-full h-12 w-12">
@@ -374,7 +435,7 @@ export default function EditorPage() {
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
         <aside className="w-32 sm:w-48 md:w-56 lg:w-64 xl:w-72 flex-shrink-0 flex flex-col p-1.5 sm:p-2 md:p-3 bg-white border-r border-gray-200 overflow-hidden">
-          {/* Sidebar content... (変更なし) */}
+          {/* ... サイドバーの内容は変更なし ... */}
           <div className="flex flex-col h-full gap-1.5 sm:gap-2 md:gap-3 overflow-y-auto">
             <Card className="p-1.5 sm:p-2 md:p-3 bg-gradient-to-br from-blue-50 to-green-50 shadow-md flex-shrink-0">
               <h2 className="text-[10px] sm:text-xs md:text-sm font-bold mb-1 sm:mb-2 text-center text-gray-800">
@@ -459,8 +520,20 @@ export default function EditorPage() {
                   <span className="text-[8px] sm:text-[10px]">しゅくしょう</span>
                 </Button>
               </div>
-              <div className="mt-1 text-center text-[10px] text-gray-600 font-bold">
-               {/* ばいりつ: {Math.round(zoom * 100)}% */}
+              <div className="mt-2 flex items-center justify-between px-1">
+                  <span className="text-[9px] sm:text-xs font-bold text-gray-700">
+                      {useGuard ? "わくからはみでない" : "じゆうにぬれるよ"}
+                  </span>
+                  <div 
+                    className="cursor-pointer"
+                    onClick={() => setUseGuard(!useGuard)}
+                  >
+                      {useGuard ? (
+                          <div className="bg-green-500 text-white p-1 rounded-full"><Lock className="w-3 h-3" /></div>
+                      ) : (
+                          <div className="bg-gray-400 text-white p-1 rounded-full"><Unlock className="w-3 h-3" /></div>
+                      )}
+                  </div>
               </div>
             </Card>
 
@@ -518,11 +591,9 @@ export default function EditorPage() {
         </aside>
 
         <main className="flex-1 min-w-0 min-h-0 flex overflow-hidden bg-gradient-to-br from-green-50 via-blue-50 to-purple-50">
-          {/* ★修正: items-center / justify-center を削除し、flex のみにする */}
           <div ref={containerRef} className="flex-1 w-full h-full overflow-auto flex p-4">
             
             <div 
-              // ★修正: m-auto を追加して、小さい時は中央、大きい時は左上基準にする
               className="relative shadow-2xl bg-white transition-all duration-200 ease-out m-auto"
               style={{
                 width: canvasRef.current ? canvasRef.current.width * zoom : "auto",
@@ -532,11 +603,16 @@ export default function EditorPage() {
               <canvas
                 ref={canvasRef}
                 className="w-full h-full touch-none rounded-lg"
+                // マウスが乗っている間、ブラシツールならカーソルを消す
                 style={{ cursor: getCursorStyle() }}
+                // ★追加: マウスの出入りでカーソル表示/非表示を切り替え
+                onMouseEnter={() => setIsHoveringCanvas(true)}
+                onMouseLeave={() => { setIsHoveringCanvas(false); stopDrawing() }}
+                
                 onMouseDown={startDrawing}
                 onMouseMove={draw}
                 onMouseUp={stopDrawing}
-                onMouseLeave={stopDrawing}
+                
                 onTouchStart={startDrawing}
                 onTouchMove={draw}
                 onTouchEnd={stopDrawing}

@@ -330,8 +330,8 @@ export default function ResultPage() {
     const correctTop = thoraxTop ?? canvas.height * 0.35
     const correctBottom = thoraxBottom ?? canvas.height * 0.65
     
-    // 許容誤差 (画像の高さの10%くらい)
-    const tolerance = canvas.height * 0.10
+    // 許容誤差 (画像の高さの5%くらい)
+    const tolerance = canvas.height * 0.05
 
     const line1Correct = Math.abs(userLine1 - correctTop) < tolerance
     const line2Correct = Math.abs(userLine2 - correctBottom) < tolerance
