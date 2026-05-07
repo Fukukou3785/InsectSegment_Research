@@ -49,9 +49,16 @@ const bodyParts: BodyPart[] = [
 
 const LEG_COLOR_RGB = [148, 103, 189]
 
+// ★追加1: 型定義は、関数の「外側」（この場所）に書きます
+type ViewMode = "painted" | "structure"
+
 export default function ResultPage() {
   const router = useRouter()
   const canvasRef = useRef<HTMLCanvasElement>(null)
+
+  // ★追加2: 状態（State）は、関数の「内側」のここに追加します
+  const [viewMode, setViewMode] = useState<ViewMode>("structure")
+
   const [selectedPart, setSelectedPart] = useState<number | null>(null)
   const [quizMode, setQuizMode] = useState(false)
   const [drawnLines, setDrawnLines] = useState<number[]>([])
@@ -60,7 +67,7 @@ export default function ResultPage() {
   
   const [thoraxTop, setThoraxTop] = useState<number | null>(null)
   const [thoraxBottom, setThoraxBottom] = useState<number | null>(null)
-
+  
   useEffect(() => {
     const imageData = sessionStorage.getItem("insectImage")
     const maskData = sessionStorage.getItem("editedMask")
@@ -88,16 +95,20 @@ export default function ResultPage() {
       canvas.height = img.height
       
       ctx.drawImage(img, 0, 0)
+      // --- 変更ここから ---
+      // 保存されているのは「比率(0.35など)」なので、キャンバスの高さを掛けて「座標」に戻す
+      const ratioTop = storedTop ? Number(storedTop) : 0.35
+      const ratioBottom = storedBottom ? Number(storedBottom) : 0.65
 
-      const currentThoraxTop = storedTop ? Number(storedTop) : img.height * 0.35
-      const currentThoraxBottom = storedBottom ? Number(storedBottom) : img.height * 0.65
+      const currentThoraxTop = ratioTop * canvas.height
+      const currentThoraxBottom = ratioBottom * canvas.height
+      // --- 変更ここまで ---
 
       if (maskData) {
         const maskImg = new Image()
         maskImg.onload = () => {
           
-          // ★修正: クイズ中はマスクを非表示にする (ただしヒントONなら表示)
-          // quizModeがオフ、または showHintがオンの場合のみマスクを描画
+// ★修正開始: クイズ中以外はモードによって塗り方を変える
           if (!quizMode || showHint) {
               ctx.save()
               
@@ -105,11 +116,18 @@ export default function ResultPage() {
               tempCanvas.width = canvas.width
               tempCanvas.height = canvas.height
               const tempCtx = tempCanvas.getContext("2d")
+              
               if (tempCtx) {
                 tempCtx.drawImage(maskImg, 0, 0, canvas.width, canvas.height)
                 const imgData = tempCtx.getImageData(0, 0, canvas.width, canvas.height)
                 const data = imgData.data
                 const width = canvas.width;
+
+                // 色の定義
+                const COLOR_HEAD = [31, 119, 180]    // 青
+                const COLOR_THORAX = [44, 160, 44]  // 緑
+                const COLOR_ABDOMEN = [214, 39, 40] // 赤
+                const COLOR_LEG = [148, 103, 189]   // 紫
 
                 for (let i = 0; i < data.length; i += 4) {
                     const r = data[i]
@@ -122,47 +140,92 @@ export default function ResultPage() {
                     const pixelIndex = i / 4;
                     const y = Math.floor(pixelIndex / width);
 
-                    const distLeg = Math.abs(r - LEG_COLOR_RGB[0]) + Math.abs(g - LEG_COLOR_RGB[1]) + Math.abs(b - LEG_COLOR_RGB[2])
-                    const isLeg = distLeg < 50; 
+                    // 足判定: 現在の色が紫に近いかどうか
+                    const distLeg = Math.abs(r - COLOR_LEG[0]) + Math.abs(g - COLOR_LEG[1]) + Math.abs(b - COLOR_LEG[2])
+                    const isLeg = distLeg < 80; 
 
-                    let shouldHighlight = false;
+                    // ▼▼▼ ロジック変更部分 ▼▼▼
+                    if (viewMode === "structure" && !quizMode) {
+// 【体のつくりモード】
+                        
+                        // 1. まず色を決める（強制的に正しい色にするロジックは維持）
+                        if (isLeg) {
+                            data[i] = COLOR_LEG[0]; data[i+1] = COLOR_LEG[1]; data[i+2] = COLOR_LEG[2];
+                        } else {
+                            if (y < currentThoraxTop) {
+                                data[i] = COLOR_HEAD[0]; data[i+1] = COLOR_HEAD[1]; data[i+2] = COLOR_HEAD[2];
+                            } else if (y < currentThoraxBottom) {
+                                data[i] = COLOR_THORAX[0]; data[i+1] = COLOR_THORAX[1]; data[i+2] = COLOR_THORAX[2];
+                            } else {
+                                data[i] = COLOR_ABDOMEN[0]; data[i+1] = COLOR_ABDOMEN[1]; data[i+2] = COLOR_ABDOMEN[2];
+                            }
+                        }
 
-                    if (selectedPart === null) {
-                        // クイズのヒント時は薄く表示
-                        data[i + 3] = quizMode ? 80 : 100 
-                        continue; 
-                    }
+                        // 2. 次に濃さ（ハイライト）を決める ★ここを追加・修正
+                        let alpha = isLeg ? 200 : 180; // 通常時の濃さ
 
-                    if (selectedPart === 0) { 
-                        if (y < currentThoraxTop && !isLeg) shouldHighlight = true;
-                    } 
-                    else if (selectedPart === 1) { 
-                        if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) shouldHighlight = true;
-                    } 
-                    else if (selectedPart === 2) { 
-                        if (y >= currentThoraxBottom && !isLeg) shouldHighlight = true;
-                    } 
-                    else if (selectedPart === 3) { 
-                        if (isLeg) shouldHighlight = true;
-                    }
+                        if (selectedPart !== null) {
+                             // 部位が選択されている場合、その部位かどうか判定
+                             let isTarget = false;
+                             
+                             if (selectedPart === 0) { // あたま
+                                 if (y < currentThoraxTop && !isLeg) isTarget = true;
+                             } else if (selectedPart === 1) { // むね
+                                 if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) isTarget = true;
+                             } else if (selectedPart === 2) { // おなか
+                                 if (y >= currentThoraxBottom && !isLeg) isTarget = true;
+                             } else if (selectedPart === 3) { // あし
+                                 if (isLeg) isTarget = true;
+                             }
+                             
+                             // ターゲットなら濃く(220)、それ以外はかなり薄く(40)する
+                             alpha = isTarget ? 220 : 40; 
+                        }
+                        
+                        data[i + 3] = alpha;
 
-                    if (shouldHighlight) {
-                        data[i + 3] = 220; 
                     } else {
-                        data[i + 3] = 40;  
+                        // 【ぬったいろモード】 または 【クイズ中】
+                        // ユーザーが塗った色をそのまま表示する
+                        let alpha = 150;
+                        
+                        // ハイライト処理 (選択した部位だけ濃くする既存ロジック)
+                        // ★修正: 「&& viewMode !== "painted"」を追加してください
+                        // これにより、ぬったいろモードではハイライトが無効になります
+                        if (selectedPart !== null && viewMode !== "painted") {
+                            let shouldHighlight = false;
+                            if (selectedPart === 0) { 
+                                if (y < currentThoraxTop && !isLeg) shouldHighlight = true;
+                            } 
+                            else if (selectedPart === 1) { 
+                                if (y >= currentThoraxTop && y < currentThoraxBottom && !isLeg) shouldHighlight = true;
+                            } 
+                            else if (selectedPart === 2) { 
+                                if (y >= currentThoraxBottom && !isLeg) shouldHighlight = true;
+                            } 
+                            else if (selectedPart === 3) { 
+                                if (isLeg) shouldHighlight = true;
+                            }
+                            alpha = shouldHighlight ? 220 : 40;
+                        }
+                        
+                        if (quizMode && showHint) alpha = 80; // ヒント時は薄く
+
+                        data[i + 3] = alpha;
                     }
+                    // ▲▲▲ ロジック変更終了 ▲▲▲
                 }
                 
                 tempCtx.putImageData(imgData, 0, 0);
                 ctx.drawImage(tempCanvas, 0, 0); 
               }
-              
               ctx.restore()
           }
 
-          if (!quizMode) {
+          // 線を引くのは「structure」モードの時だけ
+          if (!quizMode && viewMode === "structure") {
             drawDividingLines(ctx, canvas.width, canvas.height, currentThoraxTop, currentThoraxBottom)
-          } else {
+          } else if (quizMode) {
             drawQuizLines(ctx, canvas.width)
           }
         }
@@ -176,8 +239,10 @@ export default function ResultPage() {
       }
     }
     img.src = imageData
-  }, [router, quizMode, drawnLines, selectedPart, showHint]) // showHint依存を追加
+  }, [router, quizMode, drawnLines, selectedPart, showHint, viewMode]) // showHint依存を追加
 
+
+  
   const drawQuizLines = (ctx: CanvasRenderingContext2D, width: number) => {
     drawnLines.forEach((y) => {
       ctx.strokeStyle = "#f59e0b" 
@@ -390,14 +455,47 @@ export default function ResultPage() {
 
       <main className="flex-1 min-h-0 p-2 md:p-3 overflow-hidden">
         <div className="max-w-7xl mx-auto h-full flex flex-col lg:flex-row gap-2 md:gap-3">
-          <Card className="p-2 md:p-3 bg-white shadow-lg flex-1 min-h-0 flex flex-col items-center justify-center overflow-hidden">
-            <div className="relative w-full h-full flex items-center justify-center">
+          <Card className="p-2 md:p-3 bg-white shadow-lg flex-1 min-h-0 flex flex-col items-center justify-center overflow-hidden relative">
+            
+            {/* ★修正: ポジションを absolute から変更し、mb-2 で下に隙間を作る */}
+            {/* これにより、画像の上にボタンが被らず、画像の上のスペースに配置されます */}
+            {!quizMode && (
+              <div className="w-full flex justify-center mb-2 z-10">
+                <div className="bg-white/90 backdrop-blur-sm p-1 rounded-full shadow-md border border-gray-200 flex gap-1 pointer-events-auto">
+                  <button
+                    onClick={() => setViewMode("painted")}
+                    className={`px-4 py-1.5 rounded-full text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${
+                      viewMode === "painted" 
+                        ? "bg-blue-500 text-white shadow-sm" 
+                        : "text-gray-500 hover:bg-gray-100"
+                    }`}
+                  >
+                    <span>🎨</span> ぬったいろ
+                  </button>
+                  <button
+                    onClick={() => setViewMode("structure")}
+                    className={`px-4 py-1.5 rounded-full text-xs md:text-sm font-bold transition-all flex items-center gap-2 ${
+                      viewMode === "structure" 
+                        ? "bg-green-500 text-white shadow-sm" 
+                        : "text-gray-500 hover:bg-gray-100"
+                    }`}
+                  >
+                     <span>📏</span> からだのつくり
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* キャンバス (flex-1 で残りの高さを埋めるようにする) */}
+            <div className="relative w-full flex-1 flex items-center justify-center min-h-0">
               <canvas
                 ref={canvasRef}
                 className={`max-w-full max-h-full object-contain ${quizMode ? "cursor-crosshair" : ""}`}
                 onClick={handleCanvasClick}
               />
             </div>
+            
+            {/* クイズ用のメッセージ (ここは変更なし) */}
             {quizMode && drawnLines.length < 2 && (
               <div className="mt-2 p-2 bg-blue-100 rounded-lg text-center flex-shrink-0">
                 <p className="text-xs md:text-sm font-bold text-blue-800">
@@ -484,54 +582,69 @@ export default function ResultPage() {
               </>
             ) : (
               <>
-                {/* 通常モード（学習画面） */}
-                <div className="space-y-2 overflow-y-auto flex-1 min-h-0">
-                  {bodyParts.map((part, index) => (
-                    <Card
-                      key={index}
-                      className={`p-2 cursor-pointer transition-all flex-shrink-0 ${
-                        selectedPart === index ? "ring-2 ring-yellow-400 shadow-lg" : "hover:shadow-md"
-                      }`}
-                      onClick={() => setSelectedPart(selectedPart === index ? null : index)}
-                    >
-                      <div className="flex items-start gap-2">
-                        <div
-                          className="w-6 h-6 md:w-7 md:h-7 rounded-full flex-shrink-0 shadow-md"
-                          style={{ backgroundColor: part.color }}
-                        />
-                        <div className="flex-1 min-w-0">
-                          <h3 className="font-bold text-sm md:text-base mb-0.5">{part.name}</h3>
-                          <p className="text-xs text-gray-700 mb-1">{part.description}</p>
-                          {selectedPart === index && (
-                            <div className="mt-1 p-2 bg-yellow-50 rounded-lg border border-yellow-300">
-                              <p className="text-xs font-bold text-yellow-800 mb-0.5">💡 まめちしき</p>
-                              <p className="text-xs text-gray-700 leading-snug">{part.funFact}</p>
+                {/* 1. モードによる表示の切り替え */}
+                {viewMode === "structure" ? (
+                  <>
+                    {/* 「からだのつくり」モード: 解説リストを表示 */}
+                    <div className="space-y-2 overflow-y-auto flex-1 min-h-0">
+                      {bodyParts.map((part, index) => (
+                        <Card
+                          key={index}
+                          className={`p-2 cursor-pointer transition-all flex-shrink-0 ${
+                            selectedPart === index ? "ring-2 ring-yellow-400 shadow-lg" : "hover:shadow-md"
+                          }`}
+                          onClick={() => setSelectedPart(selectedPart === index ? null : index)}
+                        >
+                          <div className="flex items-start gap-2">
+                            <div
+                              className="w-6 h-6 md:w-7 md:h-7 rounded-full flex-shrink-0 shadow-md"
+                              style={{ backgroundColor: part.color }}
+                            />
+                            <div className="flex-1 min-w-0">
+                              <h3 className="font-bold text-sm md:text-base mb-0.5">{part.name}</h3>
+                              <p className="text-xs text-gray-700 mb-1">{part.description}</p>
+                              {selectedPart === index && (
+                                <div className="mt-1 p-2 bg-yellow-50 rounded-lg border border-yellow-300">
+                                  <p className="text-xs font-bold text-yellow-800 mb-0.5">💡 まめちしき</p>
+                                  <p className="text-xs text-gray-700 leading-snug">{part.funFact}</p>
+                                </div>
+                              )}
                             </div>
-                          )}
-                        </div>
-                      </div>
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
+
+                    <Card className="p-2 md:p-3 bg-gradient-to-r from-blue-50 to-green-50 border-2 border-blue-300 flex-shrink-0">
+                      <p className="text-xs leading-snug">
+                        <strong className="text-xs md:text-sm">こんちゅうのからだ：</strong>
+                        <br />
+                        こんちゅうのからだは、<strong>あたま・むね・はら</strong>の3つのぶぶんにわかれているよ！
+                        あしは6ほんあって、ぜんぶむねからはえているんだ。
+                      </p>
                     </Card>
-                  ))}
-                </div>
+                  </>
+                ) : (
+                  /* 「ぬったいろ」モード: 解説を隠してメッセージを表示 */
+                  <div className="flex-1 flex flex-col items-center justify-center text-center p-4 opacity-60">
+                     <Sparkles className="w-12 h-12 text-yellow-400 mb-2" />
+                     <p className="font-bold text-gray-600">じょうずにぬれたね！</p>
+                     <p className="text-sm text-gray-500">きみがぬったいろをじっくりみてみよう</p>
+                  </div>
+                )}
 
-                <Card className="p-2 md:p-3 bg-gradient-to-r from-blue-50 to-green-50 border-2 border-blue-300 flex-shrink-0">
-                  <p className="text-xs leading-snug">
-                    <strong className="text-xs md:text-sm">こんちゅうのからだ：</strong>
-                    <br />
-                    こんちゅうのからだは、<strong>あたま・むね・はら</strong>の3つのぶぶんにわかれているよ！
-                    あしは6ほんあって、ぜんぶむねからはえているんだ。
-                  </p>
-                </Card>
-
-                <Button
+                {/* 2. クイズボタンを削除（コメントアウト済み） */}
+                {/* <Button
                   size="sm"
                   className="w-full h-10 md:h-12 text-sm md:text-base font-bold bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 shadow-xl flex-shrink-0"
                   onClick={startQuiz}
                 >
                   🎯 クイズにちょうせん！
                 </Button>
+                */}
 
-                <div className="flex gap-2 flex-shrink-0">
+                {/* 3. ナビゲーションボタン（常に表示・下に寄せる） */}
+                <div className="flex gap-2 flex-shrink-0 mt-auto">
                   <Button
                     size="sm"
                     variant="outline"
